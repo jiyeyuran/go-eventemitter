@@ -6,19 +6,47 @@ import (
 	"sync"
 )
 
-const DefaultQueueSize = 128
-
+// IEventEmitter defines event emitter interface
 type IEventEmitter interface {
-	AddListener(evt string, listener interface{})
-	Once(evt string, listener interface{})
-	Emit(evt string, argv ...interface{})
-	SafeEmit(evt string, argv ...interface{})
-	RemoveListener(evt string, listener interface{}) (ok bool)
-	RemoveAllListeners(evt string)
-	On(evt string, listener interface{})
-	Off(evt string, listener interface{})
+	// AddListener is the alias for emitter.On(eventName, listener).
+	AddListener(evt string, listener interface{}) IEventEmitter
+
+	// Once adds a one-time listener function for the event named eventName.
+	// The next time eventName is triggered, this listener is removed and then invoked.
+	Once(evt string, listener interface{}) IEventEmitter
+
+	// Emit synchronously calls each of the listeners registered for the event named eventName,
+	// in the order they were registered, passing the supplied arguments to each.
+	// Returns true if the event had listeners, false otherwise.
+	Emit(evt string, argv ...interface{}) bool
+
+	// SafeEmit asynchronously calls each of the listeners registered for the event named eventName.
+	// By default, a maximum of 128 events can be buffered.
+	// Panic will be catched and logged as error.
+	// Returns true if the event had listeners, false otherwise.
+	SafeEmit(evt string, argv ...interface{}) bool
+
+	// RemoveListener is the alias for emitter.Off(eventName, listener).
+	RemoveListener(evt string, listener interface{}) IEventEmitter
+
+	// RemoveAllListeners removes all listeners, or those of the specified eventName.
+	RemoveAllListeners(evt string) IEventEmitter
+
+	// On adds the listener function to the end of the listeners array for the event named eventName.
+	// No checks are made to see if the listener has already been added.
+	// Multiple calls passing the same combination of eventName and listener will result in the listener
+	// being added, and called, multiple times.
+	// By default, a maximum of 10 listeners can be registered for any single event.
+	// This is a useful default that helps finding memory leaks. Note that this is not a hard limit.
+	// The EventEmitter instance will allow more listeners to be added but will output a trace warning
+	// to log indicating that a "possible EventEmitter memory leak" has been detected.
+	On(evt string, listener interface{}) IEventEmitter
+
+	// Off removes the specified listener from the listener array for the event named eventName.
+	Off(evt string, listener interface{}) IEventEmitter
+
+	// ListenerCount returns the number of listeners listening to the event named eventName.
 	ListenerCount(evt string) int
-	Len() int
 }
 
 type intervalListener struct {
@@ -113,19 +141,22 @@ func (l intervalListener) AlignArguments(args []reflect.Value) (actualArgs []ref
 	return actualArgs
 }
 
+// The EventEmitter implements IEventEmitter
 type EventEmitter struct {
 	logger       Logger
 	decoder      Decoder
 	queueSize    int
+	maxListeners int
 	evtListeners map[string][]*intervalListener
 	mu           sync.Mutex
 }
 
 func NewEventEmitter(options ...Option) IEventEmitter {
 	ee := &EventEmitter{
-		logger:    stdLogger{},
-		decoder:   JsonDecoder{},
-		queueSize: DefaultQueueSize,
+		logger:       stdLogger{},
+		decoder:      JsonDecoder{},
+		queueSize:    128,
+		maxListeners: 10,
 	}
 
 	for _, option := range options {
@@ -135,20 +166,11 @@ func NewEventEmitter(options ...Option) IEventEmitter {
 	return ee
 }
 
-func (e *EventEmitter) AddListener(evt string, listener interface{}) {
-	if err := isValidListener(listener); err != nil {
-		panic(err)
-	}
-	e.mu.Lock()
-	defer e.mu.Unlock()
-
-	if e.evtListeners == nil {
-		e.evtListeners = make(map[string][]*intervalListener)
-	}
-	e.evtListeners[evt] = append(e.evtListeners[evt], newInternalListener(evt, listener, false, e))
+func (e *EventEmitter) AddListener(evt string, listener interface{}) IEventEmitter {
+	return e.On(evt, listener)
 }
 
-func (e *EventEmitter) Once(evt string, listener interface{}) {
+func (e *EventEmitter) Once(evt string, listener interface{}) IEventEmitter {
 	if err := isValidListener(listener); err != nil {
 		panic(err)
 	}
@@ -159,24 +181,57 @@ func (e *EventEmitter) Once(evt string, listener interface{}) {
 		e.evtListeners = make(map[string][]*intervalListener)
 	}
 	e.evtListeners[evt] = append(e.evtListeners[evt], newInternalListener(evt, listener, true, e))
+
+	return e
 }
 
 // Emit fires a particular event
-func (e *EventEmitter) Emit(evt string, args ...interface{}) {
-	e.emit(evt, true, args...)
+func (e *EventEmitter) Emit(evt string, args ...interface{}) bool {
+	return e.emit(evt, true, args...)
 }
 
 // SafaEmit fires a particular event asynchronously.
-func (e *EventEmitter) SafeEmit(evt string, args ...interface{}) {
-	e.emit(evt, false, args...)
+func (e *EventEmitter) SafeEmit(evt string, args ...interface{}) bool {
+	return e.emit(evt, false, args...)
 }
 
-func (e *EventEmitter) RemoveListener(evt string, listener interface{}) (ok bool) {
+func (e *EventEmitter) RemoveListener(evt string, listener interface{}) IEventEmitter {
+	return e.Off(evt, listener)
+}
+
+func (e *EventEmitter) RemoveAllListeners(evt string) IEventEmitter {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	delete(e.evtListeners, evt)
+
+	return e
+}
+
+func (e *EventEmitter) On(evt string, listener interface{}) IEventEmitter {
+	if err := isValidListener(listener); err != nil {
+		panic(err)
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if e.evtListeners == nil {
+		e.evtListeners = make(map[string][]*intervalListener)
+	}
+	if e.maxListeners > 0 && len(e.evtListeners[evt]) >= e.maxListeners {
+		e.logger.Warn(`AddListener | max listeners (%d) for event: "%s" are reached!`, e.maxListeners, evt)
+	}
+	e.evtListeners[evt] = append(e.evtListeners[evt], newInternalListener(evt, listener, false, e))
+
+	return e
+}
+
+func (e *EventEmitter) Off(evt string, listener interface{}) IEventEmitter {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
 	if e.evtListeners == nil || listener == nil {
-		return
+		return e
 	}
 
 	idx := -1
@@ -191,27 +246,12 @@ func (e *EventEmitter) RemoveListener(evt string, listener interface{}) (ok bool
 	}
 
 	if idx < 0 {
-		return false
+		return e
 	}
 
 	e.evtListeners[evt] = append(listeners[:idx], listeners[idx+1:]...)
 
-	return true
-}
-
-func (e *EventEmitter) RemoveAllListeners(evt string) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-
-	delete(e.evtListeners, evt)
-}
-
-func (e *EventEmitter) On(evt string, listener interface{}) {
-	e.AddListener(evt, listener)
-}
-
-func (e *EventEmitter) Off(evt string, listener interface{}) {
-	e.RemoveListener(evt, listener)
+	return e
 }
 
 func (e *EventEmitter) ListenerCount(evt string) int {
@@ -232,12 +272,12 @@ func (e *EventEmitter) Len() int {
 	return len(e.evtListeners)
 }
 
-func (e *EventEmitter) emit(evt string, sync bool, args ...interface{}) {
+func (e *EventEmitter) emit(evt string, sync bool, args ...interface{}) bool {
 	e.mu.Lock()
 
 	if e.evtListeners == nil {
 		e.mu.Unlock()
-		return // has no listeners to emit yet
+		return false // has no listeners to emit yet
 	}
 	listeners := e.evtListeners[evt][:]
 	e.mu.Unlock()
@@ -267,6 +307,8 @@ func (e *EventEmitter) emit(evt string, sync bool, args ...interface{}) {
 			e.RemoveListener(evt, listener)
 		}
 	}
+
+	return len(listeners) > 0
 }
 
 func isValidListener(fn interface{}) error {

@@ -13,8 +13,8 @@ func TestEventEmitter_AddListener(t *testing.T) {
 	evName := "test"
 	emitter := NewEventEmitter()
 
-	emitter.AddListener(evName, func() {})
-	emitter.AddListener(evName, func() {})
+	emitter.On(evName, func() {})
+	emitter.On(evName, func() {})
 	assert.Equal(t, 2, emitter.ListenerCount(evName))
 }
 
