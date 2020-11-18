@@ -1,6 +1,9 @@
 package eventemitter
 
-import "log"
+import (
+	"fmt"
+	"os"
+)
 
 // Logger defines interface to print log information.
 type Logger interface {
@@ -8,13 +11,13 @@ type Logger interface {
 	Warn(format string, v ...interface{})
 }
 
-// stdLogger implements Logger with standard log.
+// stdLogger implements Logger with standard fmt.
 type stdLogger struct{}
 
 func (logger stdLogger) Error(format string, v ...interface{}) {
-	log.Printf("[ERROR] EventEmitter > "+format, v...)
+	fmt.Fprintf(os.Stderr, "[ERROR] EventEmitter > "+format, v...)
 }
 
 func (logger stdLogger) Warn(format string, v ...interface{}) {
-	log.Printf("[WARN] EventEmitter > "+format, v...)
+	fmt.Fprintf(os.Stderr, "[WARN] EventEmitter > "+format, v...)
 }
