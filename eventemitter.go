@@ -23,8 +23,8 @@ type IEventEmitter interface {
 	// SafeEmit asynchronously calls each of the listeners registered for the event named eventName.
 	// By default, a maximum of 128 events can be buffered.
 	// Panic will be catched and logged as error.
-	// Returns true if the event had listeners, false otherwise.
-	SafeEmit(evt string, argv ...interface{}) bool
+	// Returns AysncResult.
+	SafeEmit(evt string, argv ...interface{}) AysncResult
 
 	// RemoveListener is the alias for emitter.Off(eventName, listener).
 	RemoveListener(evt string, listener interface{}) IEventEmitter
@@ -52,9 +52,14 @@ type IEventEmitter interface {
 type intervalListener struct {
 	FuncValue reflect.Value
 	ArgTypes  []reflect.Type
-	ArgValues chan []reflect.Value
+	ArgValues chan argumentWrapper
 	Once      *sync.Once
 	decoder   Decoder
+}
+
+type argumentWrapper struct {
+	wg     *sync.WaitGroup
+	values []reflect.Value
 }
 
 func newInternalListener(evt string, listener interface{}, once bool, ee *EventEmitter) *intervalListener {
@@ -69,7 +74,7 @@ func newInternalListener(evt string, listener interface{}, once bool, ee *EventE
 	l := &intervalListener{
 		FuncValue: listenerValue,
 		ArgTypes:  argTypes,
-		ArgValues: make(chan []reflect.Value, ee.queueSize),
+		ArgValues: make(chan argumentWrapper, ee.queueSize),
 		decoder:   ee.decoder,
 	}
 
@@ -84,16 +89,18 @@ func newInternalListener(evt string, listener interface{}, once bool, ee *EventE
 			}
 		}()
 
-		for args := range l.ArgValues {
-			if args == nil {
+		for argument := range l.ArgValues {
+			argument.wg.Done()
+
+			if argument.values == nil {
 				continue
 			}
 			if l.Once != nil {
 				l.Once.Do(func() {
-					listenerValue.Call(args)
+					listenerValue.Call(argument.values)
 				})
 			} else {
-				listenerValue.Call(args)
+				listenerValue.Call(argument.values)
 			}
 		}
 	}()
@@ -187,12 +194,76 @@ func (e *EventEmitter) Once(evt string, listener interface{}) IEventEmitter {
 
 // Emit fires a particular event
 func (e *EventEmitter) Emit(evt string, args ...interface{}) bool {
-	return e.emit(evt, true, args...)
+	e.mu.Lock()
+
+	if e.evtListeners == nil {
+		e.mu.Unlock()
+		return false // has no listeners to emit yet
+	}
+	listeners := e.evtListeners[evt][:]
+	e.mu.Unlock()
+
+	callArgs := make([]reflect.Value, 0, len(args))
+
+	for _, arg := range args {
+		callArgs = append(callArgs, reflect.ValueOf(arg))
+	}
+
+	for _, listener := range listeners {
+		if !listener.FuncValue.Type().IsVariadic() {
+			callArgs = listener.AlignArguments(callArgs)
+		}
+		if actualArgs := listener.TryUnmarshalArguments(callArgs); listener.Once != nil {
+			listener.Once.Do(func() {
+				listener.FuncValue.Call(actualArgs)
+			})
+		} else {
+			listener.FuncValue.Call(actualArgs)
+		}
+		if listener.Once != nil {
+			e.RemoveListener(evt, listener)
+		}
+	}
+
+	return len(listeners) > 0
 }
 
 // SafaEmit fires a particular event asynchronously.
-func (e *EventEmitter) SafeEmit(evt string, args ...interface{}) bool {
-	return e.emit(evt, false, args...)
+func (e *EventEmitter) SafeEmit(evt string, args ...interface{}) AysncResult {
+	e.mu.Lock()
+
+	if e.evtListeners == nil {
+		e.mu.Unlock()
+		return nil // has no listeners to emit yet
+	}
+	listeners := e.evtListeners[evt][:]
+	e.mu.Unlock()
+
+	callArgs := make([]reflect.Value, 0, len(args))
+
+	for _, arg := range args {
+		callArgs = append(callArgs, reflect.ValueOf(arg))
+	}
+
+	wg := &sync.WaitGroup{}
+	wg.Add(len(listeners))
+
+	for _, listener := range listeners {
+		if !listener.FuncValue.Type().IsVariadic() {
+			callArgs = listener.AlignArguments(callArgs)
+		}
+
+		listener.ArgValues <- argumentWrapper{
+			wg:     wg,
+			values: listener.TryUnmarshalArguments(callArgs),
+		}
+
+		if listener.Once != nil {
+			e.RemoveListener(evt, listener)
+		}
+	}
+
+	return NewAysncResultImpl(wg)
 }
 
 func (e *EventEmitter) RemoveListener(evt string, listener interface{}) IEventEmitter {
@@ -270,45 +341,6 @@ func (e *EventEmitter) Len() int {
 	defer e.mu.Unlock()
 
 	return len(e.evtListeners)
-}
-
-func (e *EventEmitter) emit(evt string, sync bool, args ...interface{}) bool {
-	e.mu.Lock()
-
-	if e.evtListeners == nil {
-		e.mu.Unlock()
-		return false // has no listeners to emit yet
-	}
-	listeners := e.evtListeners[evt][:]
-	e.mu.Unlock()
-
-	callArgs := make([]reflect.Value, 0, len(args))
-
-	for _, arg := range args {
-		callArgs = append(callArgs, reflect.ValueOf(arg))
-	}
-
-	for _, listener := range listeners {
-		if !listener.FuncValue.Type().IsVariadic() {
-			callArgs = listener.AlignArguments(callArgs)
-		}
-		if actualArgs := listener.TryUnmarshalArguments(callArgs); sync {
-			if listener.Once != nil {
-				listener.Once.Do(func() {
-					listener.FuncValue.Call(actualArgs)
-				})
-			} else {
-				listener.FuncValue.Call(actualArgs)
-			}
-		} else {
-			listener.ArgValues <- actualArgs
-		}
-		if listener.Once != nil {
-			e.RemoveListener(evt, listener)
-		}
-	}
-
-	return len(listeners) > 0
 }
 
 func isValidListener(fn interface{}) error {
