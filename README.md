@@ -98,4 +98,6 @@ em.Emit("foo", "bad parameter")
 em.SaftEmit("foo")
 // Note: it will show error in console and no panic will be trigged.
 em.SaftEmit("foo", "bad parameter")
+// Wait result
+em.SafeEmit("foo").Wait()
 ```
