@@ -3,6 +3,7 @@ package eventemitter
 import (
 	"fmt"
 	"reflect"
+	"runtime/debug"
 	"sync"
 )
 
@@ -86,6 +87,7 @@ func newInternalListener(evt string, listener interface{}, once bool, ee *EventE
 		defer func() {
 			if r := recover(); r != nil {
 				ee.logger.Error("SafeEmit() | event listener threw an error [event:%s]: %s", evt, r)
+				debug.PrintStack()
 			}
 		}()
 

@@ -15,9 +15,9 @@ type Logger interface {
 type stdLogger struct{}
 
 func (logger stdLogger) Error(format string, v ...interface{}) {
-	fmt.Fprintf(os.Stderr, "[ERROR] EventEmitter > "+format, v...)
+	fmt.Fprintf(os.Stderr, "[ERROR] EventEmitter > "+format+"\n", v...)
 }
 
 func (logger stdLogger) Warn(format string, v ...interface{}) {
-	fmt.Fprintf(os.Stderr, "[WARN] EventEmitter > "+format, v...)
+	fmt.Fprintf(os.Stderr, "[WARN] EventEmitter > "+format+"\n", v...)
 }
