@@ -84,19 +84,14 @@ func newInternalListener(evt string, listener interface{}, once bool, ee *EventE
 	}
 
 	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				ee.logger.Error("SafeEmit() | event listener threw an error [event:%s]: %s", evt, r)
-				debug.PrintStack()
-			}
-		}()
-
-		for argument := range l.ArgValues {
-			argument.wg.Done()
-
-			if argument.values == nil {
-				continue
-			}
+		call := func(argument argumentWrapper) {
+			defer func() {
+				argument.wg.Done()
+				if r := recover(); r != nil {
+					ee.logger.Error("SafeEmit() | event listener threw an error [event:%s]: %s", evt, r)
+					debug.PrintStack()
+				}
+			}()
 			if l.Once != nil {
 				l.Once.Do(func() {
 					listenerValue.Call(argument.values)
@@ -105,33 +100,37 @@ func newInternalListener(evt string, listener interface{}, once bool, ee *EventE
 				listenerValue.Call(argument.values)
 			}
 		}
+
+		for argument := range l.ArgValues {
+			call(argument)
+		}
 	}()
 
 	return l
 }
 
 func (l intervalListener) TryUnmarshalArguments(args []reflect.Value) []reflect.Value {
-	var actualArgs []reflect.Value
+	if len(args) != len(l.ArgTypes) {
+		return args
+	}
+	actualArgs := make([]reflect.Value, len(args))
 
 	for i, arg := range args {
 		// Unmarshal bytes to golang type
 		if isBytesType(arg.Type()) && !isBytesType(l.ArgTypes[i]) {
 			val := reflect.New(l.ArgTypes[i]).Interface()
 			if err := l.decoder.Decode(arg.Bytes(), val); err == nil {
-				if actualArgs == nil {
-					actualArgs = make([]reflect.Value, len(args))
-					copy(actualArgs, args)
-				}
 				actualArgs[i] = reflect.ValueOf(val).Elem()
 			}
+		} else if arg.Type() != l.ArgTypes[i] &&
+			arg.Type().ConvertibleTo(l.ArgTypes[i]) {
+			actualArgs[i] = arg.Convert(l.ArgTypes[i])
+		} else {
+			actualArgs[i] = arg
 		}
 	}
 
-	if actualArgs != nil {
-		return actualArgs
-	}
-
-	return args
+	return actualArgs
 }
 
 func (l intervalListener) AlignArguments(args []reflect.Value) (actualArgs []reflect.Value) {
@@ -218,12 +217,10 @@ func (e *EventEmitter) Emit(evt string, args ...interface{}) bool {
 		if actualArgs := listener.TryUnmarshalArguments(callArgs); listener.Once != nil {
 			listener.Once.Do(func() {
 				listener.FuncValue.Call(actualArgs)
+				e.RemoveListener(evt, listener)
 			})
 		} else {
 			listener.FuncValue.Call(actualArgs)
-		}
-		if listener.Once != nil {
-			e.RemoveListener(evt, listener)
 		}
 	}
 

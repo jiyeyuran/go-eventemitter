@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -57,7 +56,6 @@ func TestEventEmitter_AlignArguments(t *testing.T) {
 }
 
 func TestEventEmitter_UnmarshalArguments(t *testing.T) {
-	evName := "test"
 	emitter := NewEventEmitter()
 
 	type struct1 struct {
@@ -66,7 +64,7 @@ func TestEventEmitter_UnmarshalArguments(t *testing.T) {
 
 	s := struct1{A: 1}
 	data, _ := json.Marshal(s)
-
+	evName := "test"
 	called := 0
 
 	emitter.On(evName, func(s struct1) {
@@ -86,6 +84,7 @@ func TestEventEmitter_UnmarshalArguments(t *testing.T) {
 
 	assert.Equal(t, 4*2, called)
 
+	// test unmarshal array
 	called = 0
 	evName2 := "test2"
 	ss := []struct1{{A: 1}}
@@ -104,6 +103,18 @@ func TestEventEmitter_UnmarshalArguments(t *testing.T) {
 	emitter.Emit(evName2, json.RawMessage(data))
 
 	assert.Equal(t, 3*2, called)
+
+	// test convertible type
+	evName3 := "test3"
+	called = 0
+	emitter.On(evName3, func(s int) {
+		// should called
+		called++
+	})
+	emitter.Emit(evName3, 1)
+	emitter.Emit(evName3, byte(1))
+
+	assert.Equal(t, 2, called)
 }
 
 func TestEventEmitter_ReceiveArgumentsAreTheSameAsEmiting(t *testing.T) {
@@ -126,11 +137,11 @@ func TestEventEmitter_SafeEmit(t *testing.T) {
 	emitter := NewEventEmitter()
 
 	called := false
-	emitter.On(evName, func(int) { called = true })
-	emitter.SafeEmit(evName, "1") // invalid argument, panic
-
-	time.Sleep(time.Millisecond)
-	assert.False(t, called)
+	emitter.On(evName, func(int) {
+		called = true
+	})
+	emitter.SafeEmit(evName, 1).Wait()
+	assert.True(t, called)
 }
 
 func TestEventEmitter_RemoveListener(t *testing.T) {
