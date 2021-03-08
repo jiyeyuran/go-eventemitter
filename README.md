@@ -101,3 +101,19 @@ em.SaftEmit("foo", "bad parameter")
 // Wait result
 em.SafeEmit("foo").Wait()
 ```
+##### Avoid goroutine leak by removing listener
+```golang
+em := eventemitter.NewEventEmitter()
+foo := func(){}
+
+em.On("foo", foo)
+em.On("foo", func(){})
+em.On("bar", func(){})
+
+// Remove the specified listen of event "foo"
+em.Off("foo", foo)
+// Remove all listeners of event "foo"
+em.RemoveAllListeners("foo")
+// Remove all listeners in EventEmitter object
+em.RemoveAllListeners()
+```

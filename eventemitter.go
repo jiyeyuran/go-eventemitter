@@ -2,6 +2,7 @@ package eventemitter
 
 import (
 	"fmt"
+	"log"
 	"reflect"
 	"runtime/debug"
 	"sync"
@@ -52,10 +53,10 @@ type IEventEmitter interface {
 }
 
 type intervalListener struct {
-	FuncValue reflect.Value
-	ArgTypes  []reflect.Type
-	ArgValues chan argumentWrapper
 	Once      *sync.Once
+	funcValue reflect.Value
+	argTypes  []reflect.Type
+	argValues chan argumentWrapper
 	decoder   Decoder
 	closeCh   chan struct{}
 	closed    uint32
@@ -76,9 +77,9 @@ func newInternalListener(evt string, listener interface{}, once bool, ee *EventE
 	}
 
 	l := &intervalListener{
-		FuncValue: listenerValue,
-		ArgTypes:  argTypes,
-		ArgValues: make(chan argumentWrapper, ee.queueSize),
+		argTypes:  argTypes,
+		funcValue: listenerValue,
+		argValues: make(chan argumentWrapper, ee.queueSize),
 		decoder:   ee.decoder,
 		closeCh:   make(chan struct{}),
 	}
@@ -91,29 +92,25 @@ func newInternalListener(evt string, listener interface{}, once bool, ee *EventE
 		call := func(argument argumentWrapper) {
 			defer func() {
 				argument.wg.Done()
+
 				if r := recover(); r != nil {
 					ee.logger.Error("SafeEmit() | event listener threw an error [event:%s]: %s", evt, r)
 					debug.PrintStack()
 				}
 			}()
-			if l.Once != nil {
-				l.Once.Do(func() {
-					listenerValue.Call(argument.values)
-				})
-			} else {
-				listenerValue.Call(argument.values)
-			}
+			listenerValue.Call(argument.values)
 		}
 
 		for {
 			select {
-			case argument, ok := <-l.ArgValues:
+			case argument, ok := <-l.argValues:
 				if !ok {
 					return
 				}
 				call(argument)
 			case <-l.closeCh:
-				return
+				l.closeCh = nil
+				close(l.argValues)
 			}
 		}
 	}()
@@ -121,22 +118,65 @@ func newInternalListener(evt string, listener interface{}, once bool, ee *EventE
 	return l
 }
 
-func (l intervalListener) TryUnmarshalArguments(args []reflect.Value) []reflect.Value {
-	if len(args) != len(l.ArgTypes) {
+func (l *intervalListener) Call(callArgs []reflect.Value) {
+	if atomic.LoadUint32(&l.closed) == 0 {
+		call := func() {
+			if !l.funcValue.Type().IsVariadic() {
+				callArgs = l.alignArguments(callArgs)
+			}
+			callArgs = l.convertArguments(callArgs)
+			l.funcValue.Call(callArgs)
+		}
+		if l.Once != nil {
+			l.Once.Do(call)
+		} else {
+			call()
+		}
+	}
+}
+
+func (l *intervalListener) AsyncCall(wg *sync.WaitGroup, callArgs []reflect.Value) {
+	if atomic.LoadUint32(&l.closed) == 0 {
+		call := func() {
+			if !l.funcValue.Type().IsVariadic() {
+				callArgs = l.alignArguments(callArgs)
+			}
+			l.argValues <- argumentWrapper{
+				wg:     wg,
+				values: l.convertArguments(callArgs),
+			}
+		}
+		if l.Once != nil {
+			l.Once.Do(call)
+		} else {
+			call()
+		}
+	}
+}
+
+func (l *intervalListener) Stop() {
+	if atomic.CompareAndSwapUint32(&l.closed, 0, 1) {
+		close(l.closeCh)
+		log.Println("closed")
+	}
+}
+
+func (l intervalListener) convertArguments(args []reflect.Value) []reflect.Value {
+	if len(args) != len(l.argTypes) {
 		return args
 	}
 	actualArgs := make([]reflect.Value, len(args))
 
 	for i, arg := range args {
 		// Unmarshal bytes to golang type
-		if isBytesType(arg.Type()) && !isBytesType(l.ArgTypes[i]) {
-			val := reflect.New(l.ArgTypes[i]).Interface()
+		if isBytesType(arg.Type()) && !isBytesType(l.argTypes[i]) {
+			val := reflect.New(l.argTypes[i]).Interface()
 			if err := l.decoder.Decode(arg.Bytes(), val); err == nil {
 				actualArgs[i] = reflect.ValueOf(val).Elem()
 			}
-		} else if arg.Type() != l.ArgTypes[i] &&
-			arg.Type().ConvertibleTo(l.ArgTypes[i]) {
-			actualArgs[i] = arg.Convert(l.ArgTypes[i])
+		} else if arg.Type() != l.argTypes[i] &&
+			arg.Type().ConvertibleTo(l.argTypes[i]) {
+			actualArgs[i] = arg.Convert(l.argTypes[i])
 		} else {
 			actualArgs[i] = arg
 		}
@@ -145,35 +185,20 @@ func (l intervalListener) TryUnmarshalArguments(args []reflect.Value) []reflect.
 	return actualArgs
 }
 
-func (l intervalListener) AlignArguments(args []reflect.Value) (actualArgs []reflect.Value) {
+func (l intervalListener) alignArguments(args []reflect.Value) (actualArgs []reflect.Value) {
 	// delete unwanted arguments
-	if argLen := len(l.ArgTypes); len(args) >= argLen {
+	if argLen := len(l.argTypes); len(args) >= argLen {
 		actualArgs = args[0:argLen]
 	} else {
 		actualArgs = args[:]
 
 		// append missing arguments with zero value
-		for _, argType := range l.ArgTypes[len(args):] {
+		for _, argType := range l.argTypes[len(args):] {
 			actualArgs = append(actualArgs, reflect.Zero(argType))
 		}
 	}
 
 	return actualArgs
-}
-
-func (l *intervalListener) AsyncCall(wg *sync.WaitGroup, callArgs []reflect.Value) {
-	if atomic.LoadUint32(&l.closed) == 0 {
-		l.ArgValues <- argumentWrapper{
-			wg:     wg,
-			values: l.TryUnmarshalArguments(callArgs),
-		}
-	}
-}
-
-func (l *intervalListener) Stop() {
-	if atomic.CompareAndSwapUint32(&l.closed, 0, 1) {
-		close(l.closeCh)
-	}
 }
 
 // The EventEmitter implements IEventEmitter
@@ -238,16 +263,10 @@ func (e *EventEmitter) Emit(evt string, args ...interface{}) bool {
 	}
 
 	for _, listener := range listeners {
-		if !listener.FuncValue.Type().IsVariadic() {
-			callArgs = listener.AlignArguments(callArgs)
-		}
-		if actualArgs := listener.TryUnmarshalArguments(callArgs); listener.Once != nil {
-			listener.Once.Do(func() {
-				listener.FuncValue.Call(actualArgs)
-				e.RemoveListener(evt, listener)
-			})
-		} else {
-			listener.FuncValue.Call(actualArgs)
+		listener.Call(callArgs)
+
+		if listener.Once != nil {
+			e.RemoveListener(evt, listener)
 		}
 	}
 
@@ -275,10 +294,6 @@ func (e *EventEmitter) SafeEmit(evt string, args ...interface{}) AysncResult {
 	wg.Add(len(listeners))
 
 	for _, listener := range listeners {
-		if !listener.FuncValue.Type().IsVariadic() {
-			callArgs = listener.AlignArguments(callArgs)
-		}
-
 		listener.AsyncCall(wg, callArgs)
 
 		if listener.Once != nil {
@@ -349,7 +364,7 @@ func (e *EventEmitter) Off(evt string, listener interface{}) IEventEmitter {
 	listeners := e.evtListeners[evt]
 
 	for index, item := range listeners {
-		if listener == item || item.FuncValue.Pointer() == pointer {
+		if listener == item || item.funcValue.Pointer() == pointer {
 			idx = index
 			break
 		}
