@@ -303,6 +303,8 @@ func (e *EventEmitter) RemoveAllListeners(evts ...string) IEventEmitter {
 				listener.Stop()
 			}
 		}
+		e.evtListeners = make(map[string][]*intervalListener)
+
 		return e
 	}
 
