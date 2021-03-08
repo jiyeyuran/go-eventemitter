@@ -31,8 +31,8 @@ type IEventEmitter interface {
 	// RemoveListener is the alias for emitter.Off(eventName, listener).
 	RemoveListener(evt string, listener interface{}) IEventEmitter
 
-	// RemoveAllListeners removes all listeners, or those of the specified eventName.
-	RemoveAllListeners(evt string) IEventEmitter
+	// RemoveAllListeners removes all listeners, or those of the specified eventNames.
+	RemoveAllListeners(evts ...string) IEventEmitter
 
 	// On adds the listener function to the end of the listeners array for the event named eventName.
 	// No checks are made to see if the listener has already been added.
@@ -293,15 +293,25 @@ func (e *EventEmitter) RemoveListener(evt string, listener interface{}) IEventEm
 	return e.Off(evt, listener)
 }
 
-func (e *EventEmitter) RemoveAllListeners(evt string) IEventEmitter {
+func (e *EventEmitter) RemoveAllListeners(evts ...string) IEventEmitter {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	for _, listener := range e.evtListeners[evt] {
-		listener.Stop()
+	if len(evts) == 0 {
+		for _, listeners := range e.evtListeners {
+			for _, listener := range listeners {
+				listener.Stop()
+			}
+		}
+		return e
 	}
 
-	delete(e.evtListeners, evt)
+	for _, evt := range evts {
+		for _, listener := range e.evtListeners[evt] {
+			listener.Stop()
+		}
+		delete(e.evtListeners, evt)
+	}
 
 	return e
 }
