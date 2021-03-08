@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"runtime/debug"
 	"sync"
+	"sync/atomic"
 )
 
 // IEventEmitter defines event emitter interface
@@ -56,6 +57,8 @@ type intervalListener struct {
 	ArgValues chan argumentWrapper
 	Once      *sync.Once
 	decoder   Decoder
+	closeCh   chan struct{}
+	closed    uint32
 }
 
 type argumentWrapper struct {
@@ -77,6 +80,7 @@ func newInternalListener(evt string, listener interface{}, once bool, ee *EventE
 		ArgTypes:  argTypes,
 		ArgValues: make(chan argumentWrapper, ee.queueSize),
 		decoder:   ee.decoder,
+		closeCh:   make(chan struct{}),
 	}
 
 	if once {
@@ -101,8 +105,16 @@ func newInternalListener(evt string, listener interface{}, once bool, ee *EventE
 			}
 		}
 
-		for argument := range l.ArgValues {
-			call(argument)
+		for {
+			select {
+			case argument, ok := <-l.ArgValues:
+				if !ok {
+					return
+				}
+				call(argument)
+			case <-l.closeCh:
+				return
+			}
 		}
 	}()
 
@@ -147,6 +159,21 @@ func (l intervalListener) AlignArguments(args []reflect.Value) (actualArgs []ref
 	}
 
 	return actualArgs
+}
+
+func (l *intervalListener) AsyncCall(wg *sync.WaitGroup, callArgs []reflect.Value) {
+	if atomic.LoadUint32(&l.closed) == 0 {
+		l.ArgValues <- argumentWrapper{
+			wg:     wg,
+			values: l.TryUnmarshalArguments(callArgs),
+		}
+	}
+}
+
+func (l *intervalListener) Stop() {
+	if atomic.CompareAndSwapUint32(&l.closed, 0, 1) {
+		close(l.closeCh)
+	}
 }
 
 // The EventEmitter implements IEventEmitter
@@ -252,10 +279,7 @@ func (e *EventEmitter) SafeEmit(evt string, args ...interface{}) AysncResult {
 			callArgs = listener.AlignArguments(callArgs)
 		}
 
-		listener.ArgValues <- argumentWrapper{
-			wg:     wg,
-			values: listener.TryUnmarshalArguments(callArgs),
-		}
+		listener.AsyncCall(wg, callArgs)
 
 		if listener.Once != nil {
 			e.RemoveListener(evt, listener)
@@ -272,6 +296,10 @@ func (e *EventEmitter) RemoveListener(evt string, listener interface{}) IEventEm
 func (e *EventEmitter) RemoveAllListeners(evt string) IEventEmitter {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+
+	for _, listener := range e.evtListeners[evt] {
+		listener.Stop()
+	}
 
 	delete(e.evtListeners, evt)
 
@@ -318,6 +346,8 @@ func (e *EventEmitter) Off(evt string, listener interface{}) IEventEmitter {
 	if idx < 0 {
 		return e
 	}
+
+	listeners[idx].Stop()
 
 	e.evtListeners[evt] = append(listeners[:idx], listeners[idx+1:]...)
 
