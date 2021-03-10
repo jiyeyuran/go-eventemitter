@@ -23,15 +23,27 @@ func TestEventEmitter_Once(t *testing.T) {
 
 	onceObserver := NewMockFunc(t)
 	emitter.Once(evName, onceObserver.Fn())
+	result := emitter.SafeEmit(evName)
+	assert.Equal(t, 0, emitter.ListenerCount(evName))
+	result.Wait()
 
+	emitter.Once(evName, onceObserver.Fn())
+	emitter.Emit(evName)
+	assert.Equal(t, 0, emitter.ListenerCount(evName))
+
+	emitter.Once(evName, onceObserver.Fn())
 	wg := sync.WaitGroup{}
 
 	for i := 0; i < 1000; i++ {
 		wg.Add(1)
-		go (func() {
+		go (func(i int) {
 			defer wg.Done()
-			emitter.Emit(evName)
-		})()
+			if i%2 == 0 {
+				emitter.SafeEmit(evName)
+			} else {
+				emitter.Emit(evName)
+			}
+		})(i)
 	}
 
 	wg.Wait()
@@ -67,35 +79,37 @@ func TestEventEmitter_UnmarshalArguments(t *testing.T) {
 	evName := "test"
 	called := 0
 
+	// test unmarshal to struct
 	emitter.On(evName, func(s struct1) {
 		called++
 	})
+	// test unmarshal to *struct
 	emitter.On(evName, func(s *struct1) {
 		called++
 	})
-	emitter.On(evName, func(s []byte) {
-		called++
-	})
+	// test unmarshal to json.RawMessage
 	emitter.On(evName, func(s json.RawMessage) {
 		called++
 	})
 	emitter.Emit(evName, data)
 	emitter.Emit(evName, json.RawMessage(data))
 
-	assert.Equal(t, 4*2, called)
+	assert.Equal(t, 3*2, called)
 
-	// test unmarshal array
 	called = 0
 	evName2 := "test2"
 	ss := []struct1{{A: 1}}
 	data, _ = json.Marshal(ss)
 
+	// test unmarshal []struct
 	emitter.On(evName2, func(s []struct1) {
 		called++
 	})
+	// test unmarshal []byte
 	emitter.On(evName2, func(s []byte) {
 		called++
 	})
+	// test unmarshal json.RawMessage
 	emitter.On(evName2, func(s json.RawMessage) {
 		called++
 	})
@@ -103,18 +117,6 @@ func TestEventEmitter_UnmarshalArguments(t *testing.T) {
 	emitter.Emit(evName2, json.RawMessage(data))
 
 	assert.Equal(t, 3*2, called)
-
-	// test convertible type
-	evName3 := "test3"
-	called = 0
-	emitter.On(evName3, func(s int) {
-		// should called
-		called++
-	})
-	emitter.Emit(evName3, 1)
-	emitter.Emit(evName3, byte(1))
-
-	assert.Equal(t, 2, called)
 }
 
 func TestEventEmitter_ReceiveArgumentsAreTheSameAsEmiting(t *testing.T) {
@@ -122,26 +124,19 @@ func TestEventEmitter_ReceiveArgumentsAreTheSameAsEmiting(t *testing.T) {
 	emitter := NewEventEmitter()
 	observer := NewMockFunc(t)
 
-	emitter.On(evName, func(args ...int) {
-		assert.Equal(t, 1, args[0])
-		assert.Equal(t, 2, args[1])
-	})
 	emitter.On(evName, observer.Fn())
 	emitter.Emit(evName, 1, 2)
-
 	observer.ExpectCalledWith(1, 2)
 }
 
 func TestEventEmitter_SafeEmit(t *testing.T) {
 	evName := "test"
 	emitter := NewEventEmitter()
+	onObserver := NewMockFunc(t)
 
-	called := false
-	emitter.On(evName, func(int) {
-		called = true
-	})
-	emitter.SafeEmit(evName, 1).Wait()
-	assert.True(t, called)
+	emitter.On(evName, onObserver.Fn())
+	emitter.SafeEmit(evName).Wait()
+	onObserver.ExpectCalled()
 }
 
 func TestEventEmitter_RemoveListener(t *testing.T) {
@@ -164,13 +159,41 @@ func TestEventEmitter_RemoveAllListeners(t *testing.T) {
 	emitter := NewEventEmitter()
 
 	onObserver := NewMockFunc(t)
-	fn := onObserver.Fn()
+	n := DefaultQueueSize
+	results := []AysncResult{}
 
-	emitter.On(evName, fn)
+	emitter.On(evName, onObserver.Fn())
+	emitter.Emit(evName)
+	for i := 0; i < n; i++ {
+		result := emitter.SafeEmit(evName)
+		results = append(results, result)
+	}
+	emitter.RemoveAllListeners(evName)
+	results = append(results, emitter.SafeEmit(evName))
+	for _, result := range results {
+		result.Wait()
+	}
+	onObserver.ExpectCalledTimes(n + 1)
+
+	onObserver.Reset()
 	emitter.RemoveAllListeners(evName)
 	emitter.Emit(evName)
-
+	emitter.SafeEmit(evName).Wait()
 	onObserver.ExpectCalledTimes(0)
+
+	results = []AysncResult{}
+	emitter.On(evName, onObserver.Fn())
+	emitter.Emit(evName)
+	for i := 0; i < n; i++ {
+		result := emitter.SafeEmit(evName)
+		results = append(results, result)
+	}
+	emitter.RemoveAllListeners()
+	results = append(results, emitter.SafeEmit(evName))
+	for _, result := range results {
+		result.Wait()
+	}
+	onObserver.ExpectCalledTimes(n + 1)
 
 	assert.Equal(t, 0, emitter.ListenerCount(evName))
 }

@@ -8,6 +8,8 @@ import (
 	"sync/atomic"
 )
 
+var DefaultQueueSize = 128
+
 // IEventEmitter defines event emitter interface
 type IEventEmitter interface {
 	// AddListener is the alias for emitter.On(eventName, listener).
@@ -213,7 +215,7 @@ func NewEventEmitter(options ...Option) IEventEmitter {
 	ee := &EventEmitter{
 		logger:       stdLogger{},
 		decoder:      JsonDecoder{},
-		queueSize:    128,
+		queueSize:    DefaultQueueSize,
 		maxListeners: 10,
 	}
 
