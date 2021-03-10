@@ -2,7 +2,6 @@ package eventemitter
 
 import (
 	"fmt"
-	"log"
 	"reflect"
 	"runtime/debug"
 	"sync"
@@ -157,7 +156,6 @@ func (l *intervalListener) AsyncCall(wg *sync.WaitGroup, callArgs []reflect.Valu
 func (l *intervalListener) Stop() {
 	if atomic.CompareAndSwapUint32(&l.closed, 0, 1) {
 		close(l.closeCh)
-		log.Println("closed")
 	}
 }
 
