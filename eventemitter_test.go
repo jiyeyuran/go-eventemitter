@@ -33,21 +33,26 @@ func TestEventEmitter_Once(t *testing.T) {
 
 	emitter.Once(evName, onceObserver.Fn())
 	wg := sync.WaitGroup{}
-
 	for i := 0; i < 1000; i++ {
 		wg.Add(1)
-		go (func(i int) {
+		go func() {
 			defer wg.Done()
-			if i%2 == 0 {
-				emitter.SafeEmit(evName)
-			} else {
-				emitter.Emit(evName)
-			}
-		})(i)
+			emitter.Emit(evName)
+		}()
 	}
-
 	wg.Wait()
+	onceObserver.ExpectCalledTimes(1)
 
+	emitter.Once(evName, onceObserver.Fn())
+	wg = sync.WaitGroup{}
+	for i := 0; i < 1000; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			emitter.SafeEmit(evName).Wait()
+		}()
+	}
+	wg.Wait()
 	onceObserver.ExpectCalledTimes(1)
 	assert.Equal(t, 0, emitter.ListenerCount(evName))
 }
@@ -160,19 +165,20 @@ func TestEventEmitter_RemoveAllListeners(t *testing.T) {
 
 	onObserver := NewMockFunc(t)
 	n := DefaultQueueSize
-	results := []AysncResult{}
 
 	emitter.On(evName, onObserver.Fn())
 	emitter.Emit(evName)
+	wg := sync.WaitGroup{}
 	for i := 0; i < n; i++ {
-		result := emitter.SafeEmit(evName)
-		results = append(results, result)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			emitter.SafeEmit(evName).Wait()
+		}()
 	}
+	wg.Wait()
 	emitter.RemoveAllListeners(evName)
-	results = append(results, emitter.SafeEmit(evName))
-	for _, result := range results {
-		result.Wait()
-	}
+	emitter.SafeEmit(evName).Wait()
 	onObserver.ExpectCalledTimes(n + 1)
 
 	onObserver.Reset()
@@ -181,18 +187,19 @@ func TestEventEmitter_RemoveAllListeners(t *testing.T) {
 	emitter.SafeEmit(evName).Wait()
 	onObserver.ExpectCalledTimes(0)
 
-	results = []AysncResult{}
 	emitter.On(evName, onObserver.Fn())
 	emitter.Emit(evName)
+	wg = sync.WaitGroup{}
 	for i := 0; i < n; i++ {
-		result := emitter.SafeEmit(evName)
-		results = append(results, result)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			emitter.SafeEmit(evName).Wait()
+		}()
 	}
+	wg.Wait()
 	emitter.RemoveAllListeners()
-	results = append(results, emitter.SafeEmit(evName))
-	for _, result := range results {
-		result.Wait()
-	}
+	emitter.SafeEmit(evName).Wait()
 	onObserver.ExpectCalledTimes(n + 1)
 
 	assert.Equal(t, 0, emitter.ListenerCount(evName))
