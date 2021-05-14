@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"runtime/debug"
 	"sync"
+	"sync/atomic"
 )
 
 var DefaultQueueSize = 128
@@ -158,7 +159,7 @@ type EventEmitter struct {
 	maxListeners  int
 	callWrapperCh chan callWrapper
 	evtListeners  map[string][]*intervalListener
-	loopStarted   bool
+	loopStarted   uint32
 }
 
 func NewEventEmitter(options ...Option) IEventEmitter {
@@ -218,9 +219,9 @@ func (e *EventEmitter) Emit(evt string, args ...interface{}) bool {
 
 // SafaEmit fires a particular event asynchronously.
 func (e *EventEmitter) SafeEmit(evt string, args ...interface{}) AysncResult {
-	onceListeners := []*intervalListener{}
+	removedListeners := []*intervalListener{}
 	defer func() {
-		for _, listener := range onceListeners {
+		for _, listener := range removedListeners {
 			e.RemoveListener(evt, listener.listenerValue.Interface())
 		}
 	}()
@@ -241,7 +242,7 @@ func (e *EventEmitter) SafeEmit(evt string, args ...interface{}) AysncResult {
 	for _, listener := range listeners {
 		e.asyncCall(wg, listener, callArgs)
 		if listener.Once != nil {
-			onceListeners = append(onceListeners, listener)
+			removedListeners = append(removedListeners, listener)
 		}
 	}
 
@@ -282,7 +283,6 @@ func (e *EventEmitter) Once(evt string, listener interface{}) IEventEmitter {
 		e.evtListeners = make(map[string][]*intervalListener)
 	}
 	e.evtListeners[evt] = append(e.evtListeners[evt], newInternalListener(evt, listener, true, e.decoder))
-	e.startLoop()
 
 	return e
 }
@@ -299,8 +299,6 @@ func (e *EventEmitter) On(evt string, listener interface{}) IEventEmitter {
 	}
 	internalListener := newInternalListener(evt, listener, false, e.decoder)
 	e.evtListeners[evt] = append(e.evtListeners[evt], internalListener)
-
-	e.startLoop()
 
 	return e
 }
@@ -357,9 +355,7 @@ func (e *EventEmitter) Len() int {
 
 func (e *EventEmitter) asyncCall(wg *sync.WaitGroup, listener *intervalListener, callArgs []reflect.Value) {
 	call := func() {
-		if !e.loopStarted {
-			return
-		}
+		e.startLoop()
 		e.callWrapperCh <- listener.CallWrapper(wg, callArgs)
 	}
 	if listener.Once != nil {
@@ -370,16 +366,14 @@ func (e *EventEmitter) asyncCall(wg *sync.WaitGroup, listener *intervalListener,
 }
 
 func (e *EventEmitter) startLoop() {
-	if !e.loopStarted {
-		e.loopStarted = true
+	if atomic.CompareAndSwapUint32(&e.loopStarted, 0, 1) {
 		e.callWrapperCh = make(chan callWrapper, e.queueSize)
 		go e.runLoop(e.callWrapperCh)
 	}
 }
 
 func (e *EventEmitter) stopLoop() {
-	if e.loopStarted {
-		e.loopStarted = false
+	if atomic.CompareAndSwapUint32(&e.loopStarted, 1, 0) {
 		close(e.callWrapperCh)
 	}
 }
@@ -390,8 +384,7 @@ func (e *EventEmitter) runLoop(callWrapperCh chan callWrapper) {
 			argument.wg.Done()
 
 			if r := recover(); r != nil {
-				e.logger.Error("SafeEmit() | event listener threw an error [event:%s]: %s", argument.listener.Event(), r)
-				debug.PrintStack()
+				e.logger.Error("SafeEmit() | event listener threw an error [event:%s]: %s", argument.listener.Event(), debug.Stack())
 			}
 		}()
 		argument.listener.Call(argument.values)
