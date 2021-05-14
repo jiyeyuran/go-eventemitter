@@ -30,3 +30,10 @@ func WithMaxListeners(num int) Option {
 		ee.maxListeners = num
 	}
 }
+
+// WithPanicHandler set panic handler to catch panic from listener calling.
+func WithPanicHandler(handler PanicHandler) Option {
+	return func(ee *EventEmitter) {
+		ee.panicHandler = handler
+	}
+}

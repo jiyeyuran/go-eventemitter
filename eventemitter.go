@@ -8,6 +8,8 @@ import (
 	"sync/atomic"
 )
 
+type PanicHandler func(event string, r interface{})
+
 var DefaultQueueSize = 128
 
 // IEventEmitter defines event emitter interface
@@ -61,10 +63,22 @@ type intervalListener struct {
 	decoder       Decoder
 }
 
-type callWrapper struct {
+type listenerCaller struct {
 	wg       *sync.WaitGroup
 	listener *intervalListener
 	values   []reflect.Value
+}
+
+func (c *listenerCaller) Call(handler PanicHandler) {
+	defer func() {
+		c.wg.Done()
+		if handler != nil {
+			if r := recover(); r != nil {
+				handler(c.listener.Event(), r)
+			}
+		}
+	}()
+	c.listener.Call(c.values)
 }
 
 func newInternalListener(evt string, listener interface{}, once bool, decoder Decoder) *intervalListener {
@@ -102,8 +116,8 @@ func (l *intervalListener) Call(callArgs []reflect.Value) {
 	l.listenerValue.Call(callArgs)
 }
 
-func (l *intervalListener) CallWrapper(wg *sync.WaitGroup, callArgs []reflect.Value) callWrapper {
-	return callWrapper{
+func (l *intervalListener) listenerCaller(wg *sync.WaitGroup, callArgs []reflect.Value) listenerCaller {
+	return listenerCaller{
 		wg:       wg,
 		listener: l,
 		values:   callArgs,
@@ -152,14 +166,15 @@ func (l intervalListener) alignArguments(args []reflect.Value) (actualArgs []ref
 
 // The EventEmitter implements IEventEmitter
 type EventEmitter struct {
-	mu            sync.Mutex
-	logger        Logger
-	decoder       Decoder
-	queueSize     int
-	maxListeners  int
-	callWrapperCh chan callWrapper
-	evtListeners  map[string][]*intervalListener
-	loopStarted   uint32
+	mu               sync.Mutex
+	logger           Logger
+	decoder          Decoder
+	queueSize        int
+	maxListeners     int
+	listenerCallerCh chan listenerCaller
+	evtListeners     map[string][]*intervalListener
+	loopStarted      uint32
+	panicHandler     PanicHandler
 }
 
 func NewEventEmitter(options ...Option) IEventEmitter {
@@ -171,11 +186,15 @@ func NewEventEmitter(options ...Option) IEventEmitter {
 		evtListeners: make(map[string][]*intervalListener),
 	}
 
+	ee.panicHandler = func(event string, r interface{}) {
+		ee.logger.Error("SafeEmit() | event listener threw an error [event:%s]: %s", event, debug.Stack())
+	}
+
 	for _, option := range options {
 		option(ee)
 	}
 
-	ee.callWrapperCh = make(chan callWrapper, ee.queueSize)
+	ee.listenerCallerCh = make(chan listenerCaller, ee.queueSize)
 
 	return ee
 }
@@ -356,7 +375,7 @@ func (e *EventEmitter) Len() int {
 func (e *EventEmitter) asyncCall(wg *sync.WaitGroup, listener *intervalListener, callArgs []reflect.Value) {
 	call := func() {
 		e.startLoop()
-		e.callWrapperCh <- listener.CallWrapper(wg, callArgs)
+		e.listenerCallerCh <- listener.listenerCaller(wg, callArgs)
 	}
 	if listener.Once != nil {
 		listener.Once.Do(call)
@@ -367,31 +386,20 @@ func (e *EventEmitter) asyncCall(wg *sync.WaitGroup, listener *intervalListener,
 
 func (e *EventEmitter) startLoop() {
 	if atomic.CompareAndSwapUint32(&e.loopStarted, 0, 1) {
-		e.callWrapperCh = make(chan callWrapper, e.queueSize)
-		go e.runLoop(e.callWrapperCh)
+		e.listenerCallerCh = make(chan listenerCaller, e.queueSize)
+		go e.runLoop()
 	}
 }
 
 func (e *EventEmitter) stopLoop() {
 	if atomic.CompareAndSwapUint32(&e.loopStarted, 1, 0) {
-		close(e.callWrapperCh)
+		close(e.listenerCallerCh)
 	}
 }
 
-func (e *EventEmitter) runLoop(callWrapperCh chan callWrapper) {
-	call := func(argument callWrapper) {
-		defer func() {
-			argument.wg.Done()
-
-			if r := recover(); r != nil {
-				e.logger.Error("SafeEmit() | event listener threw an error [event:%s]: %s", argument.listener.Event(), debug.Stack())
-			}
-		}()
-		argument.listener.Call(argument.values)
-	}
-
-	for callWrapper := range callWrapperCh {
-		call(callWrapper)
+func (e *EventEmitter) runLoop() {
+	for listenerCaller := range e.listenerCallerCh {
+		listenerCaller.Call(e.panicHandler)
 	}
 }
 
