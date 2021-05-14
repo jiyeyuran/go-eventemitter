@@ -6,6 +6,7 @@ import (
 	"runtime/debug"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 type PanicHandler func(event string, r interface{})
@@ -166,24 +167,26 @@ func (l intervalListener) alignArguments(args []reflect.Value) (actualArgs []ref
 
 // The EventEmitter implements IEventEmitter
 type EventEmitter struct {
-	mu               sync.Mutex
-	logger           Logger
-	decoder          Decoder
-	queueSize        int
-	maxListeners     int
-	listenerCallerCh chan listenerCaller
-	evtListeners     map[string][]*intervalListener
-	loopStarted      uint32
-	panicHandler     PanicHandler
+	mu                 sync.Mutex
+	logger             Logger
+	decoder            Decoder
+	queueSize          int
+	maxListeners       int
+	listenerCallerCh   chan listenerCaller
+	evtListeners       map[string][]*intervalListener
+	loopStarted        uint32
+	panicHandler       PanicHandler
+	idleLoopExitingDur time.Duration
 }
 
 func NewEventEmitter(options ...Option) IEventEmitter {
 	ee := &EventEmitter{
-		logger:       stdLogger{},
-		decoder:      JsonDecoder{},
-		queueSize:    DefaultQueueSize,
-		maxListeners: 10,
-		evtListeners: make(map[string][]*intervalListener),
+		logger:             stdLogger{},
+		decoder:            JsonDecoder{},
+		queueSize:          DefaultQueueSize,
+		maxListeners:       10,
+		evtListeners:       make(map[string][]*intervalListener),
+		idleLoopExitingDur: time.Minute,
 	}
 
 	ee.panicHandler = func(event string, r interface{}) {
@@ -398,8 +401,26 @@ func (e *EventEmitter) stopLoop() {
 }
 
 func (e *EventEmitter) runLoop() {
-	for listenerCaller := range e.listenerCallerCh {
-		listenerCaller.Call(e.panicHandler)
+	defer e.stopLoop()
+
+	timer := time.NewTimer(e.idleLoopExitingDur)
+	defer timer.Stop()
+
+	for {
+		select {
+		case listenerCaller, ok := <-e.listenerCallerCh:
+			if !ok {
+				return
+			}
+			listenerCaller.Call(e.panicHandler)
+			if !timer.Stop() {
+				<-timer.C
+			}
+			timer.Reset(e.idleLoopExitingDur)
+
+		case <-timer.C:
+			return
+		}
 	}
 }
 

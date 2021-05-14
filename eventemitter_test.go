@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -203,4 +204,22 @@ func TestEventEmitter_RemoveAllListeners(t *testing.T) {
 	onObserver.ExpectCalledTimes(n + 1)
 
 	assert.Equal(t, 0, emitter.ListenerCount(evName))
+}
+
+func TestEventEmitter_LoopExitedAfterIdleDuration(t *testing.T) {
+	evName := "test"
+	duration := time.Millisecond * 10
+	sleepDur := duration + time.Millisecond
+	emitter := NewEventEmitter(WithIdleLoopExitingDuration(duration)).(*EventEmitter)
+
+	onObserver := NewMockFunc(t)
+
+	emitter.On(evName, onObserver.Fn())
+	emitter.SafeEmit(evName).Wait()
+
+	assert.EqualValues(t, 1, emitter.loopStarted)
+	time.Sleep(sleepDur)
+	assert.EqualValues(t, 0, emitter.loopStarted)
+	emitter.SafeEmit(evName).Wait()
+	assert.EqualValues(t, 1, emitter.loopStarted)
 }

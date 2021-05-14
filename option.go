@@ -1,5 +1,7 @@
 package eventemitter
 
+import "time"
+
 // Option defines variadic parameter to create EventEmitter
 type Option func(*EventEmitter)
 
@@ -35,5 +37,12 @@ func WithMaxListeners(num int) Option {
 func WithPanicHandler(handler PanicHandler) Option {
 	return func(ee *EventEmitter) {
 		ee.panicHandler = handler
+	}
+}
+
+// WithIdleLoopExitingDuration set the duration to exit loop which is idle.
+func WithIdleLoopExitingDuration(d time.Duration) Option {
+	return func(ee *EventEmitter) {
+		ee.idleLoopExitingDur = d
 	}
 }
