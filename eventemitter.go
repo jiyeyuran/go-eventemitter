@@ -189,7 +189,7 @@ func NewEventEmitter(options ...Option) IEventEmitter {
 		idleLoopExitingDur: time.Minute,
 	}
 
-	ee.panicHandler = func(event string, r interface{}) {
+	ee.panicHandler = func(event string, _ interface{}) {
 		ee.logger.Error("SafeEmit() | event listener threw an error [event:%s]: %s", event, debug.Stack())
 	}
 
@@ -251,7 +251,7 @@ func (e *EventEmitter) SafeEmit(evt string, args ...interface{}) AysncResult {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	listeners := e.evtListeners[evt][:]
+	listeners := e.evtListeners[evt]
 
 	wg := &sync.WaitGroup{}
 	wg.Add(len(listeners))
@@ -295,21 +295,14 @@ func (e *EventEmitter) RemoveAllListeners(evts ...string) IEventEmitter {
 }
 
 func (e *EventEmitter) Once(evt string, listener interface{}) IEventEmitter {
-	if err := isValidListener(listener); err != nil {
-		panic(err)
-	}
-	e.mu.Lock()
-	defer e.mu.Unlock()
-
-	if e.evtListeners == nil {
-		e.evtListeners = make(map[string][]*intervalListener)
-	}
-	e.evtListeners[evt] = append(e.evtListeners[evt], newInternalListener(evt, listener, true, e.decoder))
-
-	return e
+	return e.on(evt, listener, true)
 }
 
 func (e *EventEmitter) On(evt string, listener interface{}) IEventEmitter {
+	return e.on(evt, listener, false)
+}
+
+func (e *EventEmitter) on(evt string, listener interface{}, once bool) IEventEmitter {
 	if err := isValidListener(listener); err != nil {
 		panic(err)
 	}
@@ -319,7 +312,7 @@ func (e *EventEmitter) On(evt string, listener interface{}) IEventEmitter {
 	if e.maxListeners > 0 && len(e.evtListeners[evt]) >= e.maxListeners {
 		e.logger.Warn(`AddListener | max listeners (%d) for event: "%s" are reached!`, e.maxListeners, evt)
 	}
-	internalListener := newInternalListener(evt, listener, false, e.decoder)
+	internalListener := newInternalListener(evt, listener, once, e.decoder)
 	e.evtListeners[evt] = append(e.evtListeners[evt], internalListener)
 
 	return e
@@ -360,10 +353,6 @@ func (e *EventEmitter) Off(evt string, listener interface{}) IEventEmitter {
 func (e *EventEmitter) ListenerCount(evt string) int {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-
-	if e.evtListeners == nil {
-		return 0
-	}
 
 	return len(e.evtListeners[evt])
 }

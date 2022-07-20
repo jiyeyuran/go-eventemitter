@@ -15,7 +15,8 @@ func TestEventEmitter_AddListener(t *testing.T) {
 
 	emitter.On(evName, func() {})
 	emitter.On(evName, func() {})
-	assert.Equal(t, 2, emitter.ListenerCount(evName))
+	emitter.Once(evName, func() {})
+	assert.Equal(t, 3, emitter.ListenerCount(evName))
 }
 
 func TestEventEmitter_Once(t *testing.T) {
@@ -34,7 +35,7 @@ func TestEventEmitter_Once(t *testing.T) {
 
 	emitter.Once(evName, onceObserver.Fn())
 	wg := sync.WaitGroup{}
-	for i := 0; i < 1000; i++ {
+	for i := 0; i < 10; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -46,11 +47,12 @@ func TestEventEmitter_Once(t *testing.T) {
 
 	emitter.Once(evName, onceObserver.Fn())
 	wg = sync.WaitGroup{}
-	for i := 0; i < 1000; i++ {
+	for i := 0; i < 10; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			emitter.SafeEmit(evName).Wait()
+			t.Log("evName size", emitter.ListenerCount(evName))
 		}()
 	}
 	wg.Wait()
@@ -86,15 +88,15 @@ func TestEventEmitter_UnmarshalArguments(t *testing.T) {
 	called := 0
 
 	// test unmarshal to struct
-	emitter.On(evName, func(s struct1) {
+	emitter.On(evName, func(_ struct1) {
 		called++
 	})
 	// test unmarshal to *struct
-	emitter.On(evName, func(s *struct1) {
+	emitter.On(evName, func(_ *struct1) {
 		called++
 	})
 	// test unmarshal to json.RawMessage
-	emitter.On(evName, func(s json.RawMessage) {
+	emitter.On(evName, func(_ json.RawMessage) {
 		called++
 	})
 	emitter.Emit(evName, data)
@@ -108,15 +110,15 @@ func TestEventEmitter_UnmarshalArguments(t *testing.T) {
 	data, _ = json.Marshal(ss)
 
 	// test unmarshal []struct
-	emitter.On(evName2, func(s []struct1) {
+	emitter.On(evName2, func(_ []struct1) {
 		called++
 	})
 	// test unmarshal []byte
-	emitter.On(evName2, func(s []byte) {
+	emitter.On(evName2, func(_ []byte) {
 		called++
 	})
 	// test unmarshal json.RawMessage
-	emitter.On(evName2, func(s json.RawMessage) {
+	emitter.On(evName2, func(_ json.RawMessage) {
 		called++
 	})
 	emitter.Emit(evName2, data)
