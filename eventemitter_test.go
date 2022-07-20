@@ -25,9 +25,8 @@ func TestEventEmitter_Once(t *testing.T) {
 
 	onceObserver := NewMockFunc(t)
 	emitter.Once(evName, onceObserver.Fn())
-	result := emitter.SafeEmit(evName)
+	emitter.SafeEmit(evName).Wait()
 	assert.Equal(t, 0, emitter.ListenerCount(evName))
-	result.Wait()
 
 	emitter.Once(evName, onceObserver.Fn())
 	emitter.Emit(evName)
@@ -35,6 +34,7 @@ func TestEventEmitter_Once(t *testing.T) {
 
 	emitter.Once(evName, onceObserver.Fn())
 	wg := sync.WaitGroup{}
+	// Emit
 	for i := 0; i < 10; i++ {
 		wg.Add(1)
 		go func() {
@@ -45,19 +45,34 @@ func TestEventEmitter_Once(t *testing.T) {
 	wg.Wait()
 	onceObserver.ExpectCalledTimes(1)
 
+	onceObserver = NewMockFunc(t)
+
 	emitter.Once(evName, onceObserver.Fn())
 	wg = sync.WaitGroup{}
+	// SafeEmit
 	for i := 0; i < 10; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			emitter.SafeEmit(evName).Wait()
-			t.Log("evName size", emitter.ListenerCount(evName))
 		}()
 	}
 	wg.Wait()
 	onceObserver.ExpectCalledTimes(1)
 	assert.Equal(t, 0, emitter.ListenerCount(evName))
+
+	evName1 := "test1"
+	evName2 := "test2"
+	evName1Observer := NewMockFunc(t)
+	evName2Observer := NewMockFunc(t)
+	emitter.Once(evName1, evName1Observer.Fn())
+	emitter.Once(evName2, evName2Observer.Fn())
+
+	emitter.SafeEmit(evName1)
+	emitter.SafeEmit(evName2)
+
+	evName1Observer.ExpectCalledTimes(1)
+	evName2Observer.ExpectCalledTimes(1)
 }
 
 func TestEventEmitter_AlignArguments(t *testing.T) {
@@ -167,17 +182,17 @@ func TestEventEmitter_RemoveAllListeners(t *testing.T) {
 	emitter := NewEventEmitter()
 
 	onObserver := NewMockFunc(t)
-	n := DefaultQueueSize
+	n := 10
 
 	emitter.On(evName, onObserver.Fn())
 	emitter.Emit(evName)
 	wg := sync.WaitGroup{}
 	for i := 0; i < n; i++ {
 		wg.Add(1)
-		go func() {
+		go func(index int) {
 			defer wg.Done()
-			emitter.SafeEmit(evName).Wait()
-		}()
+			emitter.SafeEmit(evName, index).Wait()
+		}(i)
 	}
 	wg.Wait()
 	emitter.RemoveAllListeners(evName)
