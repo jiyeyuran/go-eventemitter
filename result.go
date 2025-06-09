@@ -7,25 +7,27 @@ import (
 
 // Waiting all aysnc listeners to be done.
 type AysncResult interface {
-	Wait()
-	WaitCtx(ctx context.Context) error
+	Wait() error
+	WaitContext(ctx context.Context) error
 }
 
-type AysncResultImpl struct {
-	wg *sync.WaitGroup
+type aysncResultImpl struct {
+	wg  *sync.WaitGroup
+	err error
 }
 
-func NewAysncResultImpl(wg *sync.WaitGroup) AysncResult {
-	return &AysncResultImpl{
+func newAysncResultImpl(wg *sync.WaitGroup) *aysncResultImpl {
+	return &aysncResultImpl{
 		wg: wg,
 	}
 }
 
-func (s *AysncResultImpl) Wait() {
+func (s *aysncResultImpl) Wait() error {
 	s.wg.Wait()
+	return s.err
 }
 
-func (s *AysncResultImpl) WaitCtx(ctx context.Context) error {
+func (s *aysncResultImpl) WaitContext(ctx context.Context) error {
 	doneCh := make(chan struct{})
 
 	go func() {
@@ -35,7 +37,7 @@ func (s *AysncResultImpl) WaitCtx(ctx context.Context) error {
 
 	select {
 	case <-doneCh:
-		return nil
+		return s.err
 	case <-ctx.Done():
 		return ctx.Err()
 	}

@@ -1,6 +1,7 @@
 package eventemitter
 
 import (
+	"errors"
 	"fmt"
 	"reflect"
 	"runtime/debug"
@@ -27,11 +28,11 @@ type IEventEmitter interface {
 	// Returns true if the event had listeners, false otherwise.
 	Emit(evt string, argv ...interface{}) bool
 
-	// SafeEmit asynchronously calls each of the listeners registered for the event named eventName.
+	// AsyncEmit asynchronously calls each of the listeners registered for the event named eventName.
 	// By default, a maximum of 128 events can be buffered.
 	// Panic will be catched and logged as error.
 	// Returns AysncResult.
-	SafeEmit(evt string, argv ...interface{}) AysncResult
+	AsyncEmit(evt string, argv ...interface{}) AysncResult
 
 	// RemoveListener is the alias for emitter.Off(eventName, listener).
 	RemoveListener(evt string, listener interface{}) IEventEmitter
@@ -64,10 +65,11 @@ type intervalListener struct {
 	decoder       Decoder
 }
 
-type listenerWrapper struct {
-	wg       *sync.WaitGroup
-	listener *intervalListener
-	values   []reflect.Value
+type listenersWrapper struct {
+	event       string
+	asyncResult *aysncResultImpl
+	listeners   []*intervalListener
+	values      []reflect.Value
 }
 
 func newInternalListener(evt string, listener interface{}, once bool, decoder Decoder) *intervalListener {
@@ -152,14 +154,14 @@ type EventEmitter struct {
 	decoder            Decoder
 	queueSize          int
 	maxListeners       int
-	listenerWrapperCh  chan listenerWrapper
+	listenersWrapperCh chan listenersWrapper
 	evtListeners       map[string][]*intervalListener
 	loopStarted        uint32
 	panicHandler       PanicHandler
 	idleLoopExitingDur time.Duration
 }
 
-func NewEventEmitter(options ...Option) IEventEmitter {
+func New(options ...Option) IEventEmitter {
 	ee := &EventEmitter{
 		logger:             stdLogger{},
 		decoder:            JsonDecoder{},
@@ -170,14 +172,14 @@ func NewEventEmitter(options ...Option) IEventEmitter {
 	}
 
 	ee.panicHandler = func(event string, _ interface{}) {
-		ee.logger.Error("SafeEmit() | event listener threw an error [event:%s]: %s", event, debug.Stack())
+		ee.logger.Error("AsyncEmit() | event listener threw an error [event:%s]: %s", event, debug.Stack())
 	}
 
 	for _, option := range options {
 		option(ee)
 	}
 
-	ee.listenerWrapperCh = make(chan listenerWrapper, ee.queueSize)
+	ee.listenersWrapperCh = make(chan listenersWrapper, ee.queueSize)
 
 	return ee
 }
@@ -188,13 +190,6 @@ func (e *EventEmitter) AddListener(evt string, listener interface{}) IEventEmitt
 
 // Emit fires a particular event
 func (e *EventEmitter) Emit(evt string, args ...interface{}) bool {
-	onceListeners := []*intervalListener{}
-	defer func() {
-		for _, listener := range onceListeners {
-			e.Off(evt, listener.listenerValue.Interface())
-		}
-	}()
-
 	e.mu.Lock()
 	listeners := e.evtListeners[evt][:]
 	e.mu.Unlock()
@@ -208,8 +203,8 @@ func (e *EventEmitter) Emit(evt string, args ...interface{}) bool {
 	for _, listener := range listeners {
 		if listener.Once != nil {
 			listener.Once.Do(func() {
+				e.Off(evt, listener.listenerValue.Interface())
 				listener.Call(callArgs)
-				onceListeners = append(onceListeners, listener)
 			})
 		} else {
 			listener.Call(callArgs)
@@ -219,45 +214,39 @@ func (e *EventEmitter) Emit(evt string, args ...interface{}) bool {
 	return len(listeners) > 0
 }
 
-// SafaEmit fires a particular event asynchronously.
-func (e *EventEmitter) SafeEmit(evt string, args ...interface{}) AysncResult {
-	onceListeners := []*intervalListener{}
-	defer func() {
-		for _, listener := range onceListeners {
-			e.Off(evt, listener.listenerValue.Interface())
-		}
-	}()
-
+// AsyncEmit fires a particular event asynchronously.
+func (e *EventEmitter) AsyncEmit(evt string, args ...interface{}) AysncResult {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	e.startLoop()
-
 	listeners := e.evtListeners[evt]
+
 	callArgs := make([]reflect.Value, 0, len(args))
 	for _, arg := range args {
 		callArgs = append(callArgs, reflect.ValueOf(arg))
 	}
 	wg := &sync.WaitGroup{}
+	asyncResult := newAysncResultImpl(wg)
 
-	for _, listener := range listeners {
-		listenerWrapper := listenerWrapper{
-			wg:       wg,
-			listener: listener,
-			values:   callArgs,
+	if len(listeners) > 0 {
+		wg.Add(len(listeners))
+
+		if atomic.CompareAndSwapUint32(&e.loopStarted, 0, 1) {
+			e.listenersWrapperCh = make(chan listenersWrapper, e.queueSize)
+			go e.runLoop()
 		}
-		if listener.Once != nil {
-			listener.Once.Do(func() {
-				wg.Add(1)
-				e.listenerWrapperCh <- listenerWrapper
-				onceListeners = append(onceListeners, listener)
-			})
-		} else {
-			wg.Add(1)
-			e.listenerWrapperCh <- listenerWrapper
+
+		listenersWrapper := listenersWrapper{
+			event:       evt,
+			asyncResult: asyncResult,
+			listeners:   listeners,
+			values:      callArgs,
 		}
+
+		e.listenersWrapperCh <- listenersWrapper
 	}
-	return NewAysncResultImpl(wg)
+
+	return asyncResult
 }
 
 func (e *EventEmitter) RemoveListener(evt string, listener interface{}) IEventEmitter {
@@ -358,16 +347,9 @@ func (e *EventEmitter) Len() int {
 	return len(e.evtListeners)
 }
 
-func (e *EventEmitter) startLoop() {
-	if atomic.CompareAndSwapUint32(&e.loopStarted, 0, 1) {
-		e.listenerWrapperCh = make(chan listenerWrapper, e.queueSize)
-		go e.runLoop()
-	}
-}
-
 func (e *EventEmitter) stopLoop() {
 	if atomic.CompareAndSwapUint32(&e.loopStarted, 1, 0) {
-		close(e.listenerWrapperCh)
+		close(e.listenersWrapperCh)
 	}
 }
 
@@ -375,30 +357,46 @@ func (e *EventEmitter) runLoop() {
 	timer := time.NewTimer(e.idleLoopExitingDur)
 	defer timer.Stop()
 
-	ch := e.listenerWrapperCh
+	ch := e.listenersWrapperCh
 
 	for {
 		select {
-		case listenerWrapper, ok := <-ch:
+		case listenersWrapper, ok := <-ch:
 			if !ok {
 				return
 			}
 			// reset timer
 			timer.Reset(e.idleLoopExitingDur)
 
-			listener := listenerWrapper.listener
-
-			(func() {
+			event := listenersWrapper.event
+			asyncResult := listenersWrapper.asyncResult
+			do := func(listener *intervalListener) (err error) {
 				defer func() {
-					if listenerWrapper.wg != nil {
-						listenerWrapper.wg.Done()
-					}
-					if r := recover(); r != nil && e.panicHandler != nil {
-						e.panicHandler(listener.Event(), r)
+					if r := recover(); r != nil {
+						err = fmt.Errorf("listener threw an error: %v", r)
+						if e.panicHandler != nil {
+							e.panicHandler(listener.Event(), r)
+						}
 					}
 				}()
-				listener.Call(listenerWrapper.values)
-			})()
+
+				if listener.Once != nil {
+					listener.Once.Do(func() {
+						e.Off(event, listener.listenerValue.Interface())
+						listener.Call(listenersWrapper.values)
+					})
+				} else {
+					listener.Call(listenersWrapper.values)
+				}
+				return err
+			}
+
+			for _, listener := range listenersWrapper.listeners {
+				if err := do(listener); err != nil {
+					asyncResult.err = errors.Join(asyncResult.err, err)
+				}
+				asyncResult.wg.Done()
+			}
 
 		case <-timer.C:
 			if atomic.CompareAndSwapUint32(&e.loopStarted, 1, 0) {
